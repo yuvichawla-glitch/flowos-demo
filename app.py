@@ -173,20 +173,46 @@ def load_suppliers():
         return pd.read_sql_query("SELECT * FROM suppliers ORDER BY name", conn)
 
 def save_suppliers(frame):
+    """Synchronise the supplier register and linked inventory lead-time fields."""
+    records = []
+    seen_materials = set()
+    for _, r in frame.iterrows():
+        name = str(r.get("name", "")).strip()
+        if not name:
+            continue
+        material = str(r.get("material", "")).strip()
+        if material:
+            if material in seen_materials:
+                raise ValueError(f"More than one supplier is linked to {material}. Keep one primary supplier in this demo register.")
+            seen_materials.add(material)
+        lead_time = max(0.0, float(r.get("lead_time", 0) or 0))
+        reliability = min(100.0, max(0.0, float(r.get("reliability", 95) or 0)))
+        records.append((name, material, lead_time, reliability, str(r.get("contact", "")), str(r.get("status", "Active"))))
     with db() as conn:
-        for _, r in frame.iterrows():
-            if str(r.get("name", "")).strip():
-                conn.execute("""
-                    INSERT INTO suppliers(name,material,lead_time,reliability,contact,status)
-                    VALUES(?,?,?,?,?,?)
-                    ON CONFLICT(name) DO UPDATE SET
-                    material=excluded.material, lead_time=excluded.lead_time,
-                    reliability=excluded.reliability, contact=excluded.contact, status=excluded.status
-                """, (
-                    str(r["name"]), str(r.get("material","")), float(r.get("lead_time",0)),
-                    float(r.get("reliability",95)), str(r.get("contact","")), str(r.get("status","Active"))
-                ))
-    log_event("SUPPLIERS", "Supplier register saved.")
+        old_links = {
+            row[0] for row in conn.execute("SELECT material FROM suppliers WHERE material <> ''").fetchall()
+        }
+        new_links = {record[1] for record in records if record[1]}
+        # If a supplier link is removed, make that visible instead of leaving a ghost supplier name.
+        for orphaned_material in old_links - new_links:
+            conn.execute(
+                "UPDATE inventory SET supplier='Unassigned', updated_at=? WHERE material=?",
+                (datetime.now().isoformat(timespec="seconds"), orphaned_material),
+            )
+        conn.execute("DELETE FROM suppliers")
+        if records:
+            conn.executemany(
+                "INSERT INTO suppliers(name,material,lead_time,reliability,contact,status) VALUES(?,?,?,?,?,?)",
+                records,
+            )
+        # The supplier register is authoritative for the linked material's primary supplier and lead time.
+        for name, material, lead_time, _reliability, _contact, _status in records:
+            if material:
+                conn.execute(
+                    "UPDATE inventory SET supplier=?, lead_time=?, updated_at=? WHERE material=?",
+                    (name, lead_time, datetime.now().isoformat(timespec="seconds"), material),
+                )
+    log_event("SUPPLIERS", "Supplier register saved and linked lead times synchronised.")
 
 # ---------- Analytics ----------
 def enrich_inventory(raw):
@@ -481,60 +507,72 @@ div[data-testid="stMetricValue"], div[data-testid="stMetricValue"] * {
 </style>
 ''', unsafe_allow_html=True)
 
+# ---------- First-run welcome gate ----------
+# Show the welcome note once per Streamlit browser session, then open Command Centre.
+if "flowos_welcome_completed" not in st.session_state:
+    st.session_state["flowos_welcome_completed"] = False
+
 # ---------- Sidebar ----------
 if "pending_navigation" in st.session_state:
     st.session_state["flowos_navigation"] = st.session_state.pop("pending_navigation")
 
-with st.sidebar:
-    st.markdown("""
-    <div style="padding:8px 2px 20px">
-      <svg viewBox="0 0 330 92" role="img" aria-label="FlowOS logo" style="width:100%;height:auto;display:block">
-        <defs><linearGradient id="flowosBrand" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#63DDF2"/><stop offset="1" stop-color="#438BFF"/></linearGradient></defs>
-        <g transform="translate(5 8)" fill="none" stroke="url(#flowosBrand)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M18 38 L42 14 L66 38 L42 62 Z"/><path d="M42 14 L42 62 M18 38 L66 38" opacity=".5"/><path d="M66 38 L84 38 L96 26"/>
-          <circle cx="18" cy="38" r="4.5" fill="#63DDF2" stroke="none"/><circle cx="42" cy="14" r="4.5" fill="#63DDF2" stroke="none"/><circle cx="66" cy="38" r="4.5" fill="#438BFF" stroke="none"/><circle cx="42" cy="62" r="4.5" fill="#438BFF" stroke="none"/><circle cx="96" cy="26" r="4.5" fill="#63DDF2" stroke="none"/>
-        </g>
-        <text x="116" y="48" font-family="Arial,sans-serif" font-size="34" font-weight="800" letter-spacing="-1.8" fill="#F4F8FF">FLOW<tspan fill="#59D2E9">OS</tspan></text>
-        <text x="118" y="68" font-family="Arial,sans-serif" font-size="7.5" font-weight="600" letter-spacing="1.65" fill="#9DB8D4">CONNECT. PREDICT. PROGRESS.</text>
-      </svg>
-    </div>
-    <div class="eyebrow">WORKSPACE</div>
-    """, unsafe_allow_html=True)
-    pages = [
-        "Welcome", "Command Centre", "Inventory Intelligence", "Production Intelligence",
-        "Department Coordination", "Supplier Intelligence", "AI Assistant",
-        "Chain Reaction Engine", "Approvals & Audit", "Help & Support"
-    ]
-    page = st.radio("Navigate", pages, label_visibility="collapsed", key="flowos_navigation")
-    st.markdown("---")
-    st.markdown('<div class="eyebrow">SYSTEM STATUS</div><span class="status-pill">● DEMO ENVIRONMENT ONLINE</span>', unsafe_allow_html=True)
-    st.caption("Local prototype · Sample data")
-    st.caption("Human approval required for consequential actions.")
-    st.markdown("---")
-    st.markdown('<div class="eyebrow">DEMO WORKSPACE</div>', unsafe_allow_html=True)
-    st.caption("Your browser session has an isolated sample workspace.")
-    if st.button("Reset my demo workspace", use_container_width=True):
-        st.session_state["confirm_demo_reset"] = True
-    if st.session_state.get("confirm_demo_reset", False):
-        st.warning("This clears only your current demo workspace: inventory edits, approvals and activity.")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Confirm reset", type="primary", use_container_width=True):
-                try:
-                    if DB_PATH.exists():
-                        DB_PATH.unlink()
-                    for key in ["chain_result", "inventory_editor", "supplier_editor", "confirm_demo_reset"]:
-                        st.session_state.pop(key, None)
-                    init_db()
+if not st.session_state["flowos_welcome_completed"]:
+    # The first-run welcome is intentionally distraction-free: no sidebar until entry.
+    st.markdown("<style>section[data-testid='stSidebar']{display:none!important}</style>", unsafe_allow_html=True)
+    page = "Welcome"
+else:
+    with st.sidebar:
+        st.markdown("""
+        <div style="padding:8px 2px 20px">
+          <svg viewBox="0 0 330 92" role="img" aria-label="FlowOS logo" style="width:100%;height:auto;display:block">
+            <defs><linearGradient id="flowosBrand" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#63DDF2"/><stop offset="1" stop-color="#438BFF"/></linearGradient></defs>
+            <g transform="translate(5 8)" fill="none" stroke="url(#flowosBrand)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18 38 L42 14 L66 38 L42 62 Z"/><path d="M42 14 L42 62 M18 38 L66 38" opacity=".5"/><path d="M66 38 L84 38 L96 26"/>
+              <circle cx="18" cy="38" r="4.5" fill="#63DDF2" stroke="none"/><circle cx="42" cy="14" r="4.5" fill="#63DDF2" stroke="none"/><circle cx="66" cy="38" r="4.5" fill="#438BFF" stroke="none"/><circle cx="42" cy="62" r="4.5" fill="#438BFF" stroke="none"/><circle cx="96" cy="26" r="4.5" fill="#63DDF2" stroke="none"/>
+            </g>
+            <text x="116" y="48" font-family="Arial,sans-serif" font-size="34" font-weight="800" letter-spacing="-1.8" fill="#F4F8FF">FLOW<tspan fill="#59D2E9">OS</tspan></text>
+            <text x="118" y="68" font-family="Arial,sans-serif" font-size="7.5" font-weight="600" letter-spacing="1.65" fill="#9DB8D4">CONNECT. PREDICT. PROGRESS.</text>
+          </svg>
+        </div>
+        <div class="eyebrow">WORKSPACE</div>
+        """, unsafe_allow_html=True)
+        pages = [
+            "Command Centre", "Inventory Intelligence", "Production Intelligence",
+            "Department Coordination", "Supplier Intelligence", "AI Assistant",
+            "Chain Reaction Engine", "Approvals & Audit", "Help & Support"
+        ]
+        if st.session_state.get("flowos_navigation") not in pages:
+            st.session_state["flowos_navigation"] = "Command Centre"
+        page = st.radio("Navigate", pages, label_visibility="collapsed", key="flowos_navigation")
+        st.markdown("---")
+        st.markdown('<div class="eyebrow">SYSTEM STATUS</div><span class="status-pill">● DEMO ENVIRONMENT ONLINE</span>', unsafe_allow_html=True)
+        st.caption("Local prototype · Sample data")
+        st.caption("Human approval required for consequential actions.")
+        st.markdown("---")
+        st.markdown('<div class="eyebrow">DEMO WORKSPACE</div>', unsafe_allow_html=True)
+        st.caption("Your browser session has an isolated sample workspace.")
+        if st.button("Reset my demo workspace", use_container_width=True):
+            st.session_state["confirm_demo_reset"] = True
+        if st.session_state.get("confirm_demo_reset", False):
+            st.warning("This clears only your current demo workspace: inventory edits, approvals and activity.")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Confirm reset", type="primary", use_container_width=True):
+                    try:
+                        if DB_PATH.exists():
+                            DB_PATH.unlink()
+                        for key in ["chain_result", "inventory_editor", "supplier_editor", "confirm_demo_reset"]:
+                            st.session_state.pop(key, None)
+                        init_db()
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Reset could not complete: {exc}")
+            with c2:
+                if st.button("Cancel", use_container_width=True):
+                    st.session_state.pop("confirm_demo_reset", None)
                     st.rerun()
-                except Exception as exc:
-                    st.error(f"Reset could not complete: {exc}")
-        with c2:
-            if st.button("Cancel", use_container_width=True):
-                st.session_state.pop("confirm_demo_reset", None)
-                st.rerun()
-    st.markdown("---")
-    st.markdown('<div class="small-muted">FLOWOS / BUILD 0.4<br>Session-isolated demonstration prototype</div>', unsafe_allow_html=True)
+        st.markdown("---")
+        st.markdown('<div class="small-muted">FLOWOS / BUILD 0.5<br>Session-isolated demonstration prototype</div>', unsafe_allow_html=True)
 
 raw = load_inventory()
 data = enrich_inventory(raw)
@@ -589,72 +627,60 @@ def render_runway_cards(frame):
 # ---------- Pages ----------
 if page == "Welcome":
     st.markdown("""
-    <div style="display:flex;justify-content:center;padding:4px 0 12px">
-      <svg viewBox="0 0 720 180" role="img" aria-label="FlowOS logo" style="width:min(100%,560px);height:auto">
-        <defs><linearGradient id="flowosWelcome" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#63DDF2"/><stop offset="1" stop-color="#438BFF"/></linearGradient></defs>
-        <g transform="translate(18 18)" fill="none" stroke="url(#flowosWelcome)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M24 72 L70 26 L116 72 L70 118 Z"/><path d="M70 26 L70 118 M24 72 L116 72" opacity=".5"/><path d="M116 72 L151 72 L174 49"/>
-          <circle cx="24" cy="72" r="8" fill="#63DDF2" stroke="none"/><circle cx="70" cy="26" r="8" fill="#63DDF2" stroke="none"/><circle cx="116" cy="72" r="8" fill="#438BFF" stroke="none"/><circle cx="70" cy="118" r="8" fill="#438BFF" stroke="none"/><circle cx="174" cy="49" r="8" fill="#63DDF2" stroke="none"/>
-        </g>
-        <text x="220" y="100" font-family="Arial,sans-serif" font-size="66" font-weight="800" letter-spacing="-3" fill="#F4F8FF">FLOW<tspan fill="#59D2E9">OS</tspan></text>
-        <text x="224" y="135" font-family="Arial,sans-serif" font-size="15" font-weight="600" letter-spacing="4" fill="#9DB8D4">CONNECT. PREDICT. PROGRESS.</text>
-      </svg>
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
+    .stApp { background: radial-gradient(ellipse at 50% 5%, rgba(28,119,210,.34), transparent 38%), linear-gradient(145deg,#06101f 0%,#0a1e36 52%,#071321 100%) !important; }
+    .block-container { max-width: 1120px !important; padding-top: 3.2rem !important; }
+    .welcome-stage { perspective: 1200px; padding: 1.2rem 0 2rem; }
+    .welcome-card { position:relative; overflow:hidden; text-align:center; padding: clamp(28px,5vw,58px); border-radius:30px; border:1px solid rgba(116,190,255,.42); background:linear-gradient(145deg,rgba(23,65,108,.82),rgba(8,25,46,.94)); box-shadow:0 35px 90px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.13); transform:rotateX(2deg); animation:welcomeRise .9s cubic-bezier(.2,.8,.2,1) both; backdrop-filter:blur(18px); }
+    .welcome-card:before { content:''; position:absolute; inset:-40% auto auto -15%; width:70%; height:90%; background:radial-gradient(ellipse,rgba(75,190,255,.20),transparent 68%); pointer-events:none; }
+    .welcome-orb { position:absolute; border-radius:50%; filter:blur(1px); pointer-events:none; animation:orbFloat 8s ease-in-out infinite; }
+    .welcome-orb.one { width:180px;height:180px;right:5%;top:8%;background:radial-gradient(circle at 35% 35%,rgba(96,220,255,.28),rgba(56,126,255,.025) 68%); }
+    .welcome-orb.two { width:120px;height:120px;left:7%;bottom:8%;background:radial-gradient(circle at 35% 35%,rgba(78,137,255,.22),rgba(56,126,255,.01) 70%);animation-delay:-3s; }
+    .welcome-brand { width:min(100%,440px); margin:0 auto 1.5rem; filter:drop-shadow(0 10px 28px rgba(50,165,255,.28)); animation:brandFloat 5s ease-in-out infinite; }
+    .welcome-eyebrow { color:#8eddf7; font:700 10px 'DM Mono',monospace; letter-spacing:3px; margin:1rem 0; }
+    .welcome-title { color:#f7fbff; font:800 clamp(30px,5vw,48px) Manrope,sans-serif; letter-spacing:-1.8px; margin:.2rem 0 .7rem; }
+    .welcome-note { color:#f6f2ed; font:600 clamp(27px,4vw,42px) 'Caveat',cursive; line-height:1.22; max-width:760px; margin:1.2rem auto 1rem; text-shadow:0 3px 24px rgba(93,189,255,.12); }
+    .welcome-copy { color:#c4d7eb; font:400 14px/1.8 Manrope,sans-serif; max-width:680px; margin:0 auto; }
+    .welcome-foot { color:#79b9e8; font:600 10px 'DM Mono',monospace; letter-spacing:2px; margin-top:2rem; }
+    @keyframes welcomeRise { from{opacity:0;transform:translateY(28px) rotateX(8deg) scale(.975)} to{opacity:1;transform:translateY(0) rotateX(2deg) scale(1)} }
+    @keyframes brandFloat { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-7px)} }
+    @keyframes orbFloat { 0%,100%{transform:translate3d(0,0,0)} 50%{transform:translate3d(10px,-16px,0)} }
+    @media (prefers-reduced-motion:reduce) { .welcome-card,.welcome-brand,.welcome-orb{animation:none!important;transform:none!important} }
+    @media(max-width:640px) { .block-container{padding-top:1.2rem!important}.welcome-card{border-radius:20px}.welcome-orb{opacity:.45} }
+    </style>
+    <div class="welcome-stage">
+      <div class="welcome-card">
+        <div class="welcome-orb one"></div><div class="welcome-orb two"></div>
+        <svg class="welcome-brand" viewBox="0 0 720 180" role="img" aria-label="FlowOS logo">
+          <defs><linearGradient id="flowosWelcome" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#63DDF2"/><stop offset="1" stop-color="#438BFF"/></linearGradient></defs>
+          <g transform="translate(18 18)" fill="none" stroke="url(#flowosWelcome)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M24 72 L70 26 L116 72 L70 118 Z"/><path d="M70 26 L70 118 M24 72 L116 72" opacity=".5"/><path d="M116 72 L151 72 L174 49"/>
+            <circle cx="24" cy="72" r="8" fill="#63DDF2" stroke="none"/><circle cx="70" cy="26" r="8" fill="#63DDF2" stroke="none"/><circle cx="116" cy="72" r="8" fill="#438BFF" stroke="none"/><circle cx="70" cy="118" r="8" fill="#438BFF" stroke="none"/><circle cx="174" cy="49" r="8" fill="#63DDF2" stroke="none"/>
+          </g>
+          <text x="220" y="100" font-family="Arial,sans-serif" font-size="66" font-weight="800" letter-spacing="-3" fill="#F4F8FF">FLOW<tspan fill="#59D2E9">OS</tspan></text>
+          <text x="224" y="135" font-family="Arial,sans-serif" font-size="15" font-weight="600" letter-spacing="4" fill="#9DB8D4">CONNECT. PREDICT. PROGRESS.</text>
+        </svg>
+        <div class="welcome-eyebrow">OPERATIONAL INTELLIGENCE · BUILD 0.5</div>
+        <div class="welcome-title">Welcome to FlowOS</div>
+        <div class="welcome-note">Dear User,<br/>Welcome aboard.</div>
+        <div class="welcome-copy">Your operations, connected. FlowOS helps bring inventory signals, supplier context, production exposure and team decisions into one clear workspace. Explore the picture, understand what may need attention, and keep people in control of every consequential action.</div>
+        <div class="welcome-foot">CONNECT. PREDICT. PROGRESS.</div>
+      </div>
     </div>
     """, unsafe_allow_html=True)
-    page_header(
-        "FLOWOS / YOUR OPERATIONS, CONNECTED",
-        "Welcome to FlowOS",
-        "Your operational intelligence workspace is ready. Explore your operations, understand emerging risks and coordinate the next step."
-    )
-    st.markdown(
-        "<div class='panel' style='margin:8px 0 22px'>"
-        "<div class='panel-title'>A NOTE FROM THE FLOWOS TEAM</div>"
-        "<div style='color:#F5F9FF;font-size:17px;font-weight:750;margin:2px 0 8px'>Welcome aboard.</div>"
-        "<div style='color:#D1DDED;font-size:13px;line-height:1.8'>"
-        "FlowOS brings operational intelligence into one connected environment, helping you understand operations, "
-        "identify potential risks and make more informed decisions. Explore your operational areas, discover insights "
-        "and stay ahead of what matters.</div>"
-        "<div style='color:#63DDF2;font-size:11px;font-weight:800;letter-spacing:1.4px;margin-top:12px'>"
-        "THE FLOWOS TEAM</div></div>",
-        unsafe_allow_html=True
-    )
-
-    st.markdown(
-        "<div style='font-size:clamp(23px,3vw,32px);font-weight:800;color:#F5F9FF;margin:8px 0 6px'>How can we help you today?</div>"
-        "<p style='color:#B9CBE0;margin-bottom:22px'>Choose an operational area to explore. You can return to this welcome page at any time.</p>",
-        unsafe_allow_html=True
-    )
-
-    welcome_tiles = [
-        ("Command Centre", "Get a live overview of inventory health, priority signals and pending decisions.", "Explore operations"),
-        ("Inventory Intelligence", "Review stock cover, identify shortages and prepare replenishment recommendations.", "Review inventory"),
-        ("Production Intelligence", "Understand how material constraints may affect production plans and orders.", "Review production"),
-        ("Supplier Intelligence", "View supplier records, lead times and demonstration reliability inputs.", "View suppliers"),
-        ("Chain Reaction Engine", "Simulate a supplier disruption and trace its potential operational impact.", "Run a scenario"),
-        ("Approvals & Audit", "Review recommendations and keep consequential decisions under human control.", "Review decisions"),
-    ]
-    tile_cols = st.columns(3, gap="large")
-    for i, (target, description, action) in enumerate(welcome_tiles):
-        with tile_cols[i % 3]:
-            st.markdown(
-                f"<div class='panel' style='min-height:164px'>"
-                f"<div style='font-size:17px;font-weight:800;color:#F5F9FF;margin-bottom:8px'>{html.escape(target)}</div>"
-                f"<div style='font-size:12px;line-height:1.65;color:#B9CBE0'>{html.escape(description)}</div></div>",
-                unsafe_allow_html=True
-            )
-            if st.button(action, key=f"welcome_{i}", use_container_width=True, type="primary"):
-                st.session_state["pending_navigation"] = target
-                st.rerun()
-
-    st.markdown(
-        "<div class='panel' style='margin-top:12px'><div class='panel-title'>NEW TO FLOWOS?</div>"
-        "<div style='color:#D1DDED;font-size:13px;line-height:1.8'>Start with the Command Centre for an overview, then open Inventory Intelligence to see how stock-cover and supplier lead-time calculations work. "
-        "Use the Chain Reaction Engine to explore a simulated disruption. FlowOS is a demonstration prototype using sample data; it does not connect to a live ERP or send external messages.</div></div>",
-        unsafe_allow_html=True
-    )
+    st.markdown("<div style='text-align:center;color:#a9c3df;font-size:12px;margin:0 0 8px'>Press Enter in the field below, or select the button to open your workspace.</div>", unsafe_allow_html=True)
+    with st.form("flowos_enter_form", clear_on_submit=False):
+        st.text_input("Keyboard entry", placeholder="Press Enter to continue", label_visibility="collapsed", key="flowos_enter_key")
+        entered = st.form_submit_button("ENTER FLOWOS  →", type="primary", use_container_width=True)
+    if entered:
+        st.session_state["flowos_welcome_completed"] = True
+        st.session_state["flowos_navigation"] = "Command Centre"
+        st.session_state.pop("flowos_enter_key", None)
+        st.rerun()
 
 elif page == "Command Centre":
-    page_header("FLOWOS / OPERATIONAL INTELLIGENCE", "Welcome to FlowOS.", "One connected view of your operations. Detect emerging risk, coordinate the response and keep people in control.")
+    page_header("FLOWOS / OPERATIONAL INTELLIGENCE", "Command Centre", "One connected view of your operations. Detect emerging risk, coordinate the response and keep people in control.")
     st.markdown('<span class="status-pill">● DEMO ENVIRONMENT ONLINE</span> &nbsp; <span class="small-muted">Last refreshed: '+datetime.now().strftime("%d %b %Y · %H:%M")+'</span>', unsafe_allow_html=True)
     animated_metrics([
         {"label":"Materials monitored","value":total_materials,"sub":"Active inventory records"},
@@ -756,7 +782,7 @@ elif page == "Inventory Intelligence":
             "unit": st.column_config.TextColumn("Unit"),
             "supplier": st.column_config.TextColumn("Supplier"),
         },
-        key="inventory_editor"
+        key="inventory_editor", disabled=["lead_time", "supplier"]
     )
     if st.button("Save register changes", type="primary"):
         try:
@@ -941,6 +967,10 @@ elif page == "Chain Reaction Engine":
     if not data.empty:
         selected = st.selectbox("Simulate a supplier delay for", data["material"].tolist())
         delay = st.slider("Additional supplier delay (days)", 1, 14, 3)
+        # Never display a result for a previous material or delay setting.
+        previous_result = st.session_state.get("chain_result")
+        if previous_result and (previous_result.get("material") != selected or previous_result.get("delay") != delay):
+            st.session_state.pop("chain_result", None)
         r = data[data["material"] == selected].iloc[0]
         if st.button("Run chain reaction", type="primary"):
             cover = float(r["days_cover"])
