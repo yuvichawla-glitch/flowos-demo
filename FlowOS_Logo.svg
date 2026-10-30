@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="180" viewBox="0 0 720 180">
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#63DDF2"/><stop offset="1" stop-color="#438BFF"/></linearGradient></defs>
+<g transform="translate(18 18)" fill="none" stroke="url(#g)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+<path d="M24 72 L70 26 L116 72 L70 118 Z"/><path d="M70 26 L70 118 M24 72 L116 72" opacity=".5"/><path d="M116 72 L151 72 L174 49"/>
+<circle cx="24" cy="72" r="8" fill="#63DDF2" stroke="none"/><circle cx="70" cy="26" r="8" fill="#63DDF2" stroke="none"/><circle cx="116" cy="72" r="8" fill="#438BFF" stroke="none"/><circle cx="70" cy="118" r="8" fill="#438BFF" stroke="none"/><circle cx="174" cy="49" r="8" fill="#63DDF2" stroke="none"/></g>
+<text x="220" y="100" font-family="Arial,sans-serif" font-size="66" font-weight="800" letter-spacing="-3" fill="#F4F8FF">FLOW<tspan fill="#59D2E9">OS</tspan></text>
+<text x="224" y="135" font-family="Arial,sans-serif" font-size="15" font-weight="600" letter-spacing="4" fill="#9DB8D4">CONNECT. PREDICT. PROGRESS.</text></svg>

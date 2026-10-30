@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 import json
 import html
+import uuid
 from datetime import datetime, date, timedelta
 from pathlib import Path
 import streamlit.components.v1 as components
@@ -19,7 +20,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-DB_PATH = Path(__file__).with_name("flowos_data.db")
+# Each Streamlit browser session receives its own isolated demo database.
+# This is session isolation for a prototype, NOT authenticated multi-user security.
+if "flowos_workspace_id" not in st.session_state:
+    st.session_state["flowos_workspace_id"] = uuid.uuid4().hex
+DB_PATH = Path(__file__).with_name(f"flowos_demo_{st.session_state['flowos_workspace_id']}.db")
 
 # ---------- Persistence ----------
 def db():
@@ -147,12 +152,16 @@ def load_approvals():
         return pd.read_sql_query("SELECT * FROM approvals ORDER BY id DESC", conn)
 
 def create_approval(material, quantity, recommendation):
+    quantity = float(quantity)
+    if quantity <= 0:
+        return False
     with db() as conn:
         conn.execute(
             "INSERT INTO approvals(created_at,material,recommendation,quantity,status) VALUES(?,?,?,?,?)",
             (datetime.now().isoformat(timespec="seconds"), material, recommendation, float(quantity), "Pending")
         )
     log_event("APPROVAL", f"Human approval requested for {material}: {quantity:,.0f} units.")
+    return True
 
 def update_approval(approval_id, status, note=""):
     with db() as conn:
@@ -478,14 +487,21 @@ if "pending_navigation" in st.session_state:
 
 with st.sidebar:
     st.markdown("""
-    <div style="padding:10px 4px 20px">
-      <div style="font-size:25px;font-weight:850;letter-spacing:-1.4px;color:#f4f8ff">FLOW<span style="color:#54c8e7">OS</span><span style="color:#7daeff">.</span></div>
-      <div style="font:10px 'DM Mono',monospace;letter-spacing:1.5px;color:#89a6c6;margin-top:5px">CONNECT · PREDICT · PROGRESS</div>
+    <div style="padding:8px 2px 20px">
+      <svg viewBox="0 0 330 92" role="img" aria-label="FlowOS logo" style="width:100%;height:auto;display:block">
+        <defs><linearGradient id="flowosBrand" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#63DDF2"/><stop offset="1" stop-color="#438BFF"/></linearGradient></defs>
+        <g transform="translate(5 8)" fill="none" stroke="url(#flowosBrand)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 38 L42 14 L66 38 L42 62 Z"/><path d="M42 14 L42 62 M18 38 L66 38" opacity=".5"/><path d="M66 38 L84 38 L96 26"/>
+          <circle cx="18" cy="38" r="4.5" fill="#63DDF2" stroke="none"/><circle cx="42" cy="14" r="4.5" fill="#63DDF2" stroke="none"/><circle cx="66" cy="38" r="4.5" fill="#438BFF" stroke="none"/><circle cx="42" cy="62" r="4.5" fill="#438BFF" stroke="none"/><circle cx="96" cy="26" r="4.5" fill="#63DDF2" stroke="none"/>
+        </g>
+        <text x="116" y="48" font-family="Arial,sans-serif" font-size="34" font-weight="800" letter-spacing="-1.8" fill="#F4F8FF">FLOW<tspan fill="#59D2E9">OS</tspan></text>
+        <text x="118" y="68" font-family="Arial,sans-serif" font-size="7.5" font-weight="600" letter-spacing="1.65" fill="#9DB8D4">CONNECT. PREDICT. PROGRESS.</text>
+      </svg>
     </div>
     <div class="eyebrow">WORKSPACE</div>
     """, unsafe_allow_html=True)
     pages = [
-        "Command Centre", "Inventory Intelligence", "Production Intelligence",
+        "Welcome", "Command Centre", "Inventory Intelligence", "Production Intelligence",
         "Department Coordination", "Supplier Intelligence", "AI Assistant",
         "Chain Reaction Engine", "Approvals & Audit", "Help & Support"
     ]
@@ -495,7 +511,30 @@ with st.sidebar:
     st.caption("Local prototype · Sample data")
     st.caption("Human approval required for consequential actions.")
     st.markdown("---")
-    st.markdown('<div class="small-muted">FLOWOS / BUILD 0.3<br>Operational intelligence prototype</div>', unsafe_allow_html=True)
+    st.markdown('<div class="eyebrow">DEMO WORKSPACE</div>', unsafe_allow_html=True)
+    st.caption("Your browser session has an isolated sample workspace.")
+    if st.button("Reset my demo workspace", use_container_width=True):
+        st.session_state["confirm_demo_reset"] = True
+    if st.session_state.get("confirm_demo_reset", False):
+        st.warning("This clears only your current demo workspace: inventory edits, approvals and activity.")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Confirm reset", type="primary", use_container_width=True):
+                try:
+                    if DB_PATH.exists():
+                        DB_PATH.unlink()
+                    for key in ["chain_result", "inventory_editor", "supplier_editor", "confirm_demo_reset"]:
+                        st.session_state.pop(key, None)
+                    init_db()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Reset could not complete: {exc}")
+        with c2:
+            if st.button("Cancel", use_container_width=True):
+                st.session_state.pop("confirm_demo_reset", None)
+                st.rerun()
+    st.markdown("---")
+    st.markdown('<div class="small-muted">FLOWOS / BUILD 0.4<br>Session-isolated demonstration prototype</div>', unsafe_allow_html=True)
 
 raw = load_inventory()
 data = enrich_inventory(raw)
@@ -548,7 +587,73 @@ def render_runway_cards(frame):
         """, unsafe_allow_html=True)
 
 # ---------- Pages ----------
-if page == "Command Centre":
+if page == "Welcome":
+    st.markdown("""
+    <div style="display:flex;justify-content:center;padding:4px 0 12px">
+      <svg viewBox="0 0 720 180" role="img" aria-label="FlowOS logo" style="width:min(100%,560px);height:auto">
+        <defs><linearGradient id="flowosWelcome" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#63DDF2"/><stop offset="1" stop-color="#438BFF"/></linearGradient></defs>
+        <g transform="translate(18 18)" fill="none" stroke="url(#flowosWelcome)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M24 72 L70 26 L116 72 L70 118 Z"/><path d="M70 26 L70 118 M24 72 L116 72" opacity=".5"/><path d="M116 72 L151 72 L174 49"/>
+          <circle cx="24" cy="72" r="8" fill="#63DDF2" stroke="none"/><circle cx="70" cy="26" r="8" fill="#63DDF2" stroke="none"/><circle cx="116" cy="72" r="8" fill="#438BFF" stroke="none"/><circle cx="70" cy="118" r="8" fill="#438BFF" stroke="none"/><circle cx="174" cy="49" r="8" fill="#63DDF2" stroke="none"/>
+        </g>
+        <text x="220" y="100" font-family="Arial,sans-serif" font-size="66" font-weight="800" letter-spacing="-3" fill="#F4F8FF">FLOW<tspan fill="#59D2E9">OS</tspan></text>
+        <text x="224" y="135" font-family="Arial,sans-serif" font-size="15" font-weight="600" letter-spacing="4" fill="#9DB8D4">CONNECT. PREDICT. PROGRESS.</text>
+      </svg>
+    </div>
+    """, unsafe_allow_html=True)
+    page_header(
+        "FLOWOS / YOUR OPERATIONS, CONNECTED",
+        "Welcome to FlowOS",
+        "Your operational intelligence workspace is ready. Explore your operations, understand emerging risks and coordinate the next step."
+    )
+    st.markdown(
+        "<div class='panel' style='margin:8px 0 22px'>"
+        "<div class='panel-title'>A NOTE FROM THE FLOWOS TEAM</div>"
+        "<div style='color:#F5F9FF;font-size:17px;font-weight:750;margin:2px 0 8px'>Welcome aboard.</div>"
+        "<div style='color:#D1DDED;font-size:13px;line-height:1.8'>"
+        "FlowOS brings operational intelligence into one connected environment, helping you understand operations, "
+        "identify potential risks and make more informed decisions. Explore your operational areas, discover insights "
+        "and stay ahead of what matters.</div>"
+        "<div style='color:#63DDF2;font-size:11px;font-weight:800;letter-spacing:1.4px;margin-top:12px'>"
+        "THE FLOWOS TEAM</div></div>",
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        "<div style='font-size:clamp(23px,3vw,32px);font-weight:800;color:#F5F9FF;margin:8px 0 6px'>How can we help you today?</div>"
+        "<p style='color:#B9CBE0;margin-bottom:22px'>Choose an operational area to explore. You can return to this welcome page at any time.</p>",
+        unsafe_allow_html=True
+    )
+
+    welcome_tiles = [
+        ("Command Centre", "Get a live overview of inventory health, priority signals and pending decisions.", "Explore operations"),
+        ("Inventory Intelligence", "Review stock cover, identify shortages and prepare replenishment recommendations.", "Review inventory"),
+        ("Production Intelligence", "Understand how material constraints may affect production plans and orders.", "Review production"),
+        ("Supplier Intelligence", "View supplier records, lead times and demonstration reliability inputs.", "View suppliers"),
+        ("Chain Reaction Engine", "Simulate a supplier disruption and trace its potential operational impact.", "Run a scenario"),
+        ("Approvals & Audit", "Review recommendations and keep consequential decisions under human control.", "Review decisions"),
+    ]
+    tile_cols = st.columns(3, gap="large")
+    for i, (target, description, action) in enumerate(welcome_tiles):
+        with tile_cols[i % 3]:
+            st.markdown(
+                f"<div class='panel' style='min-height:164px'>"
+                f"<div style='font-size:17px;font-weight:800;color:#F5F9FF;margin-bottom:8px'>{html.escape(target)}</div>"
+                f"<div style='font-size:12px;line-height:1.65;color:#B9CBE0'>{html.escape(description)}</div></div>",
+                unsafe_allow_html=True
+            )
+            if st.button(action, key=f"welcome_{i}", use_container_width=True, type="primary"):
+                st.session_state["pending_navigation"] = target
+                st.rerun()
+
+    st.markdown(
+        "<div class='panel' style='margin-top:12px'><div class='panel-title'>NEW TO FLOWOS?</div>"
+        "<div style='color:#D1DDED;font-size:13px;line-height:1.8'>Start with the Command Centre for an overview, then open Inventory Intelligence to see how stock-cover and supplier lead-time calculations work. "
+        "Use the Chain Reaction Engine to explore a simulated disruption. FlowOS is a demonstration prototype using sample data; it does not connect to a live ERP or send external messages.</div></div>",
+        unsafe_allow_html=True
+    )
+
+elif page == "Command Centre":
     page_header("FLOWOS / OPERATIONAL INTELLIGENCE", "Welcome to FlowOS.", "One connected view of your operations. Detect emerging risk, coordinate the response and keep people in control.")
     st.markdown('<span class="status-pill">● DEMO ENVIRONMENT ONLINE</span> &nbsp; <span class="small-muted">Last refreshed: '+datetime.now().strftime("%d %b %Y · %H:%M")+'</span>', unsafe_allow_html=True)
     animated_metrics([
@@ -567,7 +672,9 @@ if page == "Command Centre":
         if data.empty:
             st.info("Add inventory records to generate operational signals.")
         else:
-            for _, r in data.sort_values(["risk","days_cover"]).iterrows():
+            risk_rank = {"CRITICAL": 0, "WATCH": 1, "HEALTHY": 2}
+            priority_data = data.assign(_risk_rank=data["risk"].map(risk_rank)).sort_values(["_risk_rank", "days_cover"])
+            for _, r in priority_data.iterrows():
                 if r["risk"] != "HEALTHY":
                     show_risk_signal(r)
             if critical_n == 0 and watch_n == 0:
@@ -581,7 +688,9 @@ if page == "Command Centre":
     with c1:
         st.markdown('<div class="panel"><div class="panel-title">Stock cover by material · days</div>', unsafe_allow_html=True)
         if not data.empty:
-            chart = data.set_index("material")[["days_remaining","lead_time"]].rename(columns={"days_remaining":"Stock remaining (days)","lead_time":"Supplier lead time (days)"})
+            chart = data.set_index("material")[["days_remaining","lead_time"]].copy()
+            chart["days_remaining"] = chart["days_remaining"].replace(float("inf"), float("nan"))
+            chart = chart.rename(columns={"days_remaining":"Stock remaining (days)","lead_time":"Supplier lead time (days)"})
             st.bar_chart(chart, color=["#4d91ff","#e7b65c"], height=250)
         st.markdown('</div>', unsafe_allow_html=True)
     with c2:
@@ -652,7 +761,7 @@ elif page == "Inventory Intelligence":
     if st.button("Save register changes", type="primary"):
         try:
             save_inventory(edited, replace_all=True)
-            st.success("Saved. Your changes, including removed rows, are stored locally and will remain after restart.")
+            st.success("Saved. Your changes, including removed rows, are stored in this session’s local demo workspace.")
             st.rerun()
         except Exception as e:
             st.error(f"Could not save register: {e}")
@@ -675,13 +784,17 @@ elif page == "Inventory Intelligence":
         )
         st.markdown("#### Calculation method")
         st.markdown(
-            "**Stock remaining (days)** = stock on hand ÷ average daily usage.  \\n"
-            "**Coverage gap (days)** = supplier lead time − stock remaining, minimum zero.  \\n"
+            "**Stock remaining (days)** = stock on hand ÷ average daily usage.\n\n"
+            "**Coverage gap (days)** = supplier lead time − stock remaining, minimum zero.\n\n"
             "**Risk** = Critical if stock runs out before supplier delivery; Watch if cover is less than lead time + 3 days; otherwise Healthy."
         )
         st.caption("The 3-day buffer is a demonstration assumption. The reorder estimate excludes incoming purchase orders, MOQ, demand variability and supplier reliability.")
         st.markdown("### Replenishment decision")
-        choice = st.selectbox("Select material", data["material"].tolist())
+        risk_rank = {"CRITICAL": 0, "WATCH": 1, "HEALTHY": 2}
+        preferred = data.assign(_risk_rank=data["risk"].map(risk_rank)).sort_values(
+            ["_risk_rank", "suggested_reorder"], ascending=[True, False]
+        )["material"].iloc[0]
+        choice = st.selectbox("Select material", data["material"].tolist(), index=data["material"].tolist().index(preferred))
         r = data[data["material"] == choice].iloc[0]
         a, b, c = st.columns(3)
         days_remaining = r["days_remaining"]
@@ -690,11 +803,14 @@ elif page == "Inventory Intelligence":
         b.metric("Supplier lead time", f'{r["lead_time"]:.1f} days')
         c.metric("Coverage gap", f'{r["coverage_gap"]:.1f} days')
         st.metric("Illustrative reorder quantity", f'{r["suggested_reorder"]:,.0f} {r["unit"]}')
-        st.caption("Example: 1,000 kg ÷ 2,000 kg/day = 0.5 days of stock. With a 5-day lead time, the coverage gap is 4.5 days.")
-        if st.button("Request human approval", type="primary"):
-            create_approval(choice, r["suggested_reorder"], "Illustrative replenishment recommendation")
-            st.success("Approval request created. No purchase order has been sent.")
-            st.rerun()
+        st.caption("Example: 5,000 kg ÷ 2,000 kg/day = 2.5 days of stock. With a 5-day lead time, the coverage gap is 2.5 days.")
+        if r["suggested_reorder"] > 0:
+            if st.button("Request human approval", type="primary"):
+                if create_approval(choice, r["suggested_reorder"], "Illustrative replenishment recommendation"):
+                    st.success("Approval request created. No purchase order has been sent.")
+                    st.rerun()
+        else:
+            st.info("No replenishment approval is needed: the illustrative reorder quantity is zero.")
     else:
         st.info("No inventory records. Import a file or add a material above.")
 
@@ -708,10 +824,10 @@ elif page == "Production Intelligence":
         planned_daily = st.number_input("Planned daily production consumption", min_value=0.0, value=float(r["daily_usage"]), step=50.0)
         open_orders = st.number_input("Open customer orders potentially affected", min_value=0, value=3, step=1)
         days_horizon = st.slider("Planning horizon (days)", 1, 30, 7)
-        available_days = float(r["current_stock"]) / max(planned_daily, .0001)
-        exposure = max(0, days_horizon - available_days)
+        available_days = float(r["current_stock"]) / planned_daily if planned_daily > 0 else float("inf")
+        exposure = max(0, days_horizon - available_days) if planned_daily > 0 else 0
         a,b,c = st.columns(3)
-        a.metric("Estimated stock cover", f"{available_days:.1f} days")
+        a.metric("Estimated stock cover", "No usage forecast" if available_days == float("inf") else f"{available_days:.1f} days")
         b.metric("Potential exposure window", f"{exposure:.1f} days")
         c.metric("Orders to review", f"{open_orders if exposure > 0 else 0}")
         if exposure > 0:
@@ -832,7 +948,8 @@ elif page == "Chain Reaction Engine":
             gap = max(0, new_lead - cover)
             st.session_state["chain_result"] = {
                 "material": selected, "cover": cover, "lead": new_lead, "gap": gap,
-                "supplier": str(r["supplier"]), "delay": delay
+                "supplier": str(r["supplier"]), "delay": delay,
+                "daily_usage": float(r["daily_usage"]), "unit": str(r["unit"])
             }
             log_event("SIMULATION", f"Simulated {delay}-day supplier delay for {selected}.")
         result = st.session_state.get("chain_result")
@@ -841,15 +958,19 @@ elif page == "Chain Reaction Engine":
                 ("01","SUPPLIER EVENT",f'{result["supplier"]} reports a simulated {result["delay"]}-day delay.'),
                 ("02","INVENTORY SIGNAL",f'{result["material"]} has {result["cover"]:.1f} days of stock cover versus {result["lead"]:.1f} days revised lead time.'),
                 ("03","PRODUCTION EXPOSURE",f'Illustrative supply gap: {result["gap"]:.1f} days. Review production commitments and open orders.'),
-                ("04","TEAM COORDINATION","Procurement, production and sales receive a review task in this demonstration workflow."),
+                ("04","TEAM COORDINATION","Recommended review tasks for procurement, production and sales. No tasks are sent automatically."),
                 ("05","HUMAN DECISION","FlowOS prepares a recommendation. A person must review and approve any consequential action.")
             ]
             for n,title,desc in steps:
                 st.markdown(f'<div class="panel" style="display:flex;gap:16px;align-items:flex-start"><div style="font:500 18px DM Mono;color:#5bbbe8">{n}</div><div><div class="panel-title" style="margin:0 0 5px">{title}</div><div style="font-size:13px;color:#c4d4e6">{html.escape(desc)}</div></div></div>', unsafe_allow_html=True)
-            if st.button("Create human review approval"):
-                create_approval(result["material"], max(0, result["gap"]*float(r["daily_usage"])), "Chain Reaction Engine scenario review")
-                st.success("Human review approval created. No external action was taken.")
-                st.rerun()
+            proposed_qty = max(0, result["gap"] * float(result["daily_usage"]))
+            if proposed_qty > 0:
+                if st.button("Create human review approval"):
+                    create_approval(result["material"], proposed_qty, "Chain Reaction Engine scenario review")
+                    st.success("Human review approval created. No external action was taken.")
+                    st.rerun()
+            else:
+                st.info("No supply gap is predicted in this scenario, so no approval request is required.")
     else:
         st.info("Add inventory records to run the scenario.")
 
