@@ -4,6 +4,7 @@ import sqlite3
 import json
 import html
 import uuid
+import math
 from datetime import datetime, date, timedelta
 from pathlib import Path
 import streamlit.components.v1 as components
@@ -139,6 +140,41 @@ def save_inventory(frame, replace_all=False):
                 now,
             ))
     log_event("INVENTORY", "Material register saved.")
+
+def validate_inventory_frame(frame):
+    """Return a cleaned inventory frame and human-readable validation errors."""
+    required = ["material", "current_stock", "daily_usage", "lead_time"]
+    missing = [c for c in required if c not in frame.columns]
+    if missing:
+        return pd.DataFrame(), ["Missing required columns: " + ", ".join(missing)]
+
+    cleaned = frame.copy()
+    cleaned.columns = [str(c).strip().lower().replace(" ", "_") for c in cleaned.columns]
+    errors = []
+    cleaned["material"] = cleaned["material"].fillna("").astype(str).str.strip()
+    if (cleaned["material"] == "").any():
+        errors.append("Every row needs a material name.")
+    duplicate_names = cleaned.loc[cleaned["material"].duplicated(keep=False) & (cleaned["material"] != ""), "material"].unique().tolist()
+    if duplicate_names:
+        errors.append("Duplicate material names: " + ", ".join(duplicate_names[:8]) + ". Keep one row per material.")
+
+    for col in ["current_stock", "daily_usage", "lead_time"]:
+        numeric = pd.to_numeric(cleaned[col], errors="coerce")
+        invalid = numeric.isna() | ~numeric.map(lambda x: math.isfinite(float(x)) if pd.notna(x) else False)
+        if invalid.any():
+            errors.append(f"{col.replace('_', ' ').title()} must contain valid numbers in every row.")
+        elif (numeric < 0).any():
+            errors.append(f"{col.replace('_', ' ').title()} cannot be negative.")
+        cleaned[col] = numeric
+
+    for col, default in [("unit", "units"), ("supplier", "Unassigned")]:
+        if col not in cleaned.columns:
+            cleaned[col] = default
+        cleaned[col] = cleaned[col].fillna(default).astype(str).str.strip().replace("", default)
+
+    if errors:
+        return cleaned, errors
+    return cleaned[["material", "current_stock", "daily_usage", "lead_time", "unit", "supplier"]], []
 
 def load_activity(limit=12):
     with db() as conn:
@@ -539,15 +575,17 @@ else:
         pages = [
             "Command Centre", "Inventory Intelligence", "Production Intelligence",
             "Department Coordination", "Supplier Intelligence", "AI Assistant",
-            "Chain Reaction Engine", "Approvals & Audit", "Help & Support"
+            "Chain Reaction Engine", "Approvals & Audit", "Help & Support",
+            "Plans & Subscription", "FAQ"
         ]
         if st.session_state.get("flowos_navigation") not in pages:
             st.session_state["flowos_navigation"] = "Command Centre"
         page = st.radio("Navigate", pages, label_visibility="collapsed", key="flowos_navigation")
         st.markdown("---")
         st.markdown('<div class="eyebrow">SYSTEM STATUS</div><span class="status-pill">● DEMO ENVIRONMENT ONLINE</span>', unsafe_allow_html=True)
-        st.caption("Local prototype · Sample data")
+        st.caption("Prototype workspace · Sample data")
         st.caption("Human approval required for consequential actions.")
+        st.caption("Designed for clarity, not ERP replacement.")
         st.markdown("---")
         st.markdown('<div class="eyebrow">DEMO WORKSPACE</div>', unsafe_allow_html=True)
         st.caption("Your browser session has an isolated sample workspace.")
@@ -682,6 +720,7 @@ if page == "Welcome":
 elif page == "Command Centre":
     page_header("FLOWOS / OPERATIONAL INTELLIGENCE", "Command Centre", "One connected view of your operations. Detect emerging risk, coordinate the response and keep people in control.")
     st.markdown('<span class="status-pill">● DEMO ENVIRONMENT ONLINE</span> &nbsp; <span class="small-muted">Last refreshed: '+datetime.now().strftime("%d %b %Y · %H:%M")+'</span>', unsafe_allow_html=True)
+    st.info("Start with Inventory Intelligence, then review supplier lead times and run a Chain Reaction scenario. All figures in this prototype are demonstration data.")
     animated_metrics([
         {"label":"Materials monitored","value":total_materials,"sub":"Active inventory records"},
         {"label":"Critical signals","value":critical_n,"sub":"Require immediate review"},
@@ -757,16 +796,17 @@ elif page == "Inventory Intelligence":
             try:
                 incoming = pd.read_csv(uploaded) if uploaded.name.lower().endswith(".csv") else pd.read_excel(uploaded)
                 incoming.columns = [str(c).strip().lower().replace(" ","_") for c in incoming.columns]
-                required = {"material","current_stock","daily_usage","lead_time"}
-                if not required.issubset(set(incoming.columns)):
-                    st.error("Missing required columns: material, current_stock, daily_usage, lead_time.")
+                cleaned, validation_errors = validate_inventory_frame(incoming)
+                if validation_errors:
+                    st.error("Please correct these import issues before saving:")
+                    for issue in validation_errors:
+                        st.write("• " + issue)
                 else:
-                    for col, default in [("unit","units"),("supplier","Primary supplier")]:
-                        if col not in incoming.columns: incoming[col] = default
-                    st.dataframe(incoming.head(20), use_container_width=True)
+                    st.success(f"Validation passed · {len(cleaned)} material rows ready to import.")
+                    st.dataframe(cleaned.head(20), use_container_width=True)
                     if st.button("Import and save records", type="primary"):
-                        save_inventory(incoming[["material","current_stock","daily_usage","lead_time","unit","supplier"]])
-                        st.success("Inventory records imported and saved to the local database.")
+                        save_inventory(cleaned)
+                        st.success("Inventory records validated and saved to this local demo workspace.")
                         st.rerun()
             except Exception as e:
                 st.error(f"Could not read that file: {e}")
@@ -786,9 +826,15 @@ elif page == "Inventory Intelligence":
     )
     if st.button("Save register changes", type="primary"):
         try:
-            save_inventory(edited, replace_all=True)
-            st.success("Saved. Your changes, including removed rows, are stored in this session’s local demo workspace.")
-            st.rerun()
+            cleaned, validation_errors = validate_inventory_frame(edited)
+            if validation_errors:
+                st.error("Changes were not saved. Please correct the following:")
+                for issue in validation_errors:
+                    st.write("• " + issue)
+            else:
+                save_inventory(cleaned, replace_all=True)
+                st.success("Validated changes saved, including removed rows, in this local demo workspace.")
+                st.rerun()
         except Exception as e:
             st.error(f"Could not save register: {e}")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1036,7 +1082,7 @@ elif page == "Help & Support":
     page_header("SUPPORT / KNOWLEDGE", "How can we help?", "A clear path to understand the prototype, troubleshoot data and get operational support.")
     a,b = st.columns(2, gap="large")
     with a:
-        st.markdown('<div class="panel"><div class="panel-title">Getting started</div><h3 style="font-size:18px">Set up your operational picture</h3><p>1. Import an inventory CSV or Excel file.<br>2. Review days of stock cover and risk.<br>3. Check supplier lead times.<br>4. Create an approval request.<br>5. Run a disruption scenario.</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel"><div class="panel-title">Getting started</div><h3 style="font-size:18px">Set up your operational picture</h3><p>1. Import an inventory CSV or Excel file.<br>2. Review days of stock cover and risk.<br>3. Check supplier lead times.<br>4. Create an approval request.<br>5. Run a disruption scenario.<br>6. Visit FAQ for product and data limitations.</p></div>', unsafe_allow_html=True)
         st.markdown('<div class="panel"><div class="panel-title">Data and privacy</div><p>This prototype stores its demonstration records in a local SQLite database beside app.py. It does not connect to an external ERP or send supplier emails.</p></div>', unsafe_allow_html=True)
     with b:
         st.markdown('<div class="panel"><div class="panel-title">Support request</div>', unsafe_allow_html=True)
@@ -1053,6 +1099,73 @@ elif page == "Help & Support":
             else:
                 st.error("Please describe the issue.")
         st.markdown('</div>', unsafe_allow_html=True)
+
+elif page == "Plans & Subscription":
+    page_header("FLOWOS / PLANS", "Plans built around operational maturity", "A proposed pricing structure for growing manufacturers. Choose a starting point, then scale as workflows mature.")
+    st.info("Pricing below is illustrative product planning, not an active subscription checkout. No payment is collected and no plan is activated from this prototype.")
+    plans = [
+        {"name":"Starter", "price":"₹2,499", "period":"per workspace / month", "audience":"For small teams organising operational data", "features":["Inventory register and CSV imports", "Stock-cover and risk dashboard", "Supplier register and lead-time tracking", "Basic disruption scenarios", "Human-reviewed approval log", "Email support (planned)"], "tag":"START SMALL"},
+        {"name":"Growth", "price":"₹7,999", "period":"per workspace / month", "audience":"For growing manufacturers coordinating multiple teams", "features":["Everything in Starter", "Expanded department coordination", "Advanced scenario history and comparisons (planned)", "Custom operational reports (planned)", "Multiple team workspaces (planned)", "Priority support (planned)"], "tag":"GROW WITH FLOWOS"},
+        {"name":"Enterprise", "price":"Custom", "period":"based on scope and deployment", "audience":"For organisations with integration and governance needs", "features":["Tailored workflows and role permissions (planned)", "ERP and business-system integrations (planned)", "Advanced audit and governance (planned)", "Deployment and onboarding support (planned)", "Service-level options (planned)", "Dedicated account support (planned)"], "tag":"TAILORED"},
+    ]
+    cols = st.columns(3, gap="large")
+    for col, plan in zip(cols, plans):
+        with col:
+            st.markdown('<div class="panel" style="height:100%;min-height:390px">', unsafe_allow_html=True)
+            st.markdown(f'<div class="eyebrow">{html.escape(plan["tag"])}</div><h2 style="font-size:24px;margin:0">{html.escape(plan["name"])}</h2><div style="font-size:29px;font-weight:800;color:#edf5ff;margin:14px 0 2px">{html.escape(plan["price"])}</div><div class="small-muted">{html.escape(plan["period"])}</div><p style="font-size:12px;margin-top:12px">{html.escape(plan["audience"])}</p><hr>', unsafe_allow_html=True)
+            for feature in plan["features"]:
+                st.markdown(f'<div style="font-size:12px;color:#c6d7e9;padding:5px 0">✓ {html.escape(feature)}</div>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("### What is included in the current prototype?")
+    st.write("The current demonstration build includes the core navigation, local sample workspace, inventory calculations, supplier register, rule-based assistant, disruption simulation and human approval log. Subscription billing, account management, cloud persistence, production-grade security and the features marked planned are not implemented.")
+    st.markdown("### Request a product discussion")
+    with st.form("plans_interest_form"):
+        contact_name = st.text_input("Name or organisation")
+        contact_email = st.text_input("Contact email (optional)")
+        desired_plan = st.selectbox("Plan of interest", ["Starter", "Growth", "Enterprise", "Not sure yet"])
+        use_case = st.text_area("What would you want FlowOS to help with?")
+        interest_submit = st.form_submit_button("Record interest in this demo", type="primary")
+    if interest_submit:
+        if not contact_name.strip() or not use_case.strip():
+            st.error("Please enter a name or organisation and a short description of your use case.")
+        else:
+            log_event("PLAN INTEREST", f"{contact_name.strip()[:80]} · {desired_plan} · {use_case.strip()[:220]}")
+            st.success("Interest recorded locally in this demo workspace. No email was sent and no subscription was created.")
+
+elif page == "FAQ":
+    page_header("FLOWOS / KNOWLEDGE BASE", "Frequently asked questions", "Straight answers about what FlowOS is designed to do, how the prototype works and what is still on the roadmap.")
+    faq_groups = {
+        "About FlowOS": [
+            ("What is FlowOS?", "FlowOS is an operational-intelligence concept designed to connect business information, surface potential risks, simulate disruptions and support better-informed decisions."),
+            ("Who is FlowOS designed for?", "The initial target segment is small and medium-sized manufacturers that need a clearer view of inventory, suppliers and production-related risks."),
+            ("Does FlowOS replace an ERP?", "No. The intended direction is to complement existing ERP and business systems with an operational risk and decision-support layer."),
+            ("What makes FlowOS different?", "The product direction prioritises a focused interface, understandable risk signals, practical scenario walkthroughs and human-reviewed decisions. These advantages still need validation with real customers."),
+        ],
+        "Data, integrations and security": [
+            ("Does the current prototype connect to SAP, Oracle or Microsoft Dynamics?", "No. The current prototype does not connect to live ERP systems. Imports are performed using a defined CSV or Excel inventory structure."),
+            ("Does FlowOS use real supplier data?", "No. The included supplier and inventory records are fictional demonstration data. Users can enter their own data in the current demo workspace, but should not upload confidential business information."),
+            ("Is the prototype secure for confidential company data?", "It is not production-grade or enterprise-certified. The demo uses a local SQLite database associated with a browser session and does not provide authenticated multi-user access or enterprise security controls."),
+            ("Will my data always be saved?", "The current deployment uses prototype storage and hosting that may be temporary. Do not rely on it for permanent business records or backups."),
+        ],
+        "Intelligence and decisions": [
+            ("Is the AI Assistant a live generative AI model?", "No. In this prototype, the assistant uses deterministic rules and local demonstration data. A live AI model is a possible future development, not a current feature."),
+            ("Are the disruption simulations predictions?", "No. They are illustrative what-if calculations based on entered stock cover and supplier lead time. They do not forecast actual delivery outcomes."),
+            ("Does FlowOS automatically place purchase orders?", "No. The prototype can create a local approval record. It does not send purchase orders, supplier messages or external instructions."),
+            ("How is stock risk calculated?", "Stock cover is current stock divided by average daily usage. It is compared with supplier lead time and an illustrative three-day buffer. The estimate does not account for every real-world planning factor."),
+        ],
+        "Plans and support": [
+            ("Are the prices on the Plans page live prices?", "No. They are illustrative proposed prices for product planning. There is no active payment, billing or subscription service in this prototype."),
+            ("Can I upgrade or cancel a subscription?", "Subscription management is not implemented yet. No subscription can be purchased or cancelled through this demo."),
+            ("How do I request support?", "Use Help & Support to record a local support request in the demo activity log. It does not send an email."),
+            ("How can I suggest a feature?", "Use the support form and select the relevant topic. Feedback is recorded locally in the current demonstration workspace."),
+        ],
+    }
+    for group_name, questions in faq_groups.items():
+        st.markdown(f"### {group_name}")
+        for question, answer in questions:
+            with st.expander(question):
+                st.write(answer)
+    st.markdown('<div class="panel"><div class="panel-title">Prototype transparency</div><p>FlowOS is currently a demonstration prototype. It uses sample data, deterministic calculations and local records. Live ERP integrations, generative AI, predictive models, payment processing, permanent cloud storage and external messaging are not active features.</p></div>', unsafe_allow_html=True)
 
 # ---------- Footer ----------
 st.markdown("""
